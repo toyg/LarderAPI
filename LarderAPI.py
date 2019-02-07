@@ -132,6 +132,8 @@ class Fetcher:
     @staticmethod
     def init(token_string: str, auth_mode: AuthMode = AuthMode.TOKEN):
         """Provide the token that API requires to work. This must always be called before other API activities"""
+        if auth_mode == AuthMode.OAUTH:
+            raise NotImplementedError("OAuth is not supported yet.")
         Fetcher.token = token_string
         Fetcher.auth_mode = auth_mode
 
