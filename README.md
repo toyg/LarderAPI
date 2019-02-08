@@ -6,10 +6,15 @@ This is a simple wrapper for the [Larder.io](https://larder.io) API.
 Currently it only supports (some) read-only operations, 
 mostly meant for backup activities.
 
+Requirements
+-----------
+
+* Python 3.7 or 3.6 (if 3.6, you have to manually `pip install dataclasses`)
+* `pip install -r requirements.txt`
+
 Basic Usage
 ----------
 
-Make sure you `pip install -r requirements.txt` first.
 ```python
 from LarderAPI import *
 init("your token here")
