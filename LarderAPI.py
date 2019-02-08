@@ -188,13 +188,17 @@ class Bookmark(TimestampedObject):
         tt = [Tag(**t) for t in self.tags]
         self.tags = tt
 
+    def load(self):
+        raise NotImplemented("You cannot retrieve a link by ID, this is a limitation of the API. "
+                             "Get bookmarks from folders or search (when we implement that).")
+
 
 @dataclass
 class Tag(TimestampedObject):
     """ Tag representation.
-    Note: you cannot instantiate a tag by name and then delete it.
+    Note: you cannot instantiate a tag by name.
     This is a limitation of the Larder API.
-    To delete a tag you didn't create, get all tags first and search in there."""
+    To edit a tag you didn't create, get all tags first and search in there."""
 
     name: str = None
     color: str = None
@@ -203,6 +207,9 @@ class Tag(TimestampedObject):
         if self.name is None:
             raise ValueError("You cannot save a tag without a name")
         super().save()
+
+    def load(self):
+        raise NotImplemented("You cannot retrieve a tag by name or ID")
 
 
 def _json_to_pydate(date_string):
