@@ -90,7 +90,7 @@ def backup(token: str,
     fetches = []
     writes = []
     logging.info("Retrieving folders...")
-    folders = Folder.get_all_folders()
+    folders = Folder.get_all()
     logging.info("... folders retrieved.")
     target_file = Path(target_folder) / "LarderBackup_{:%Y-%m-%d_%H:%M:%S}.html".format(datetime.now())
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:

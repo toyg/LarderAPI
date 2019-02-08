@@ -10,7 +10,8 @@
 # along with this program. If not, see https://www.gnu.org/licenses/ .
 
 import logging
-from dataclasses import dataclass, field
+from copy import copy
+from dataclasses import dataclass, field, asdict, fields
 from datetime import datetime, timezone
 from enum import Enum
 from time import sleep
@@ -18,16 +19,81 @@ from time import sleep
 import requests
 
 API_URL = "https://larder.io/api/1/"
-API_FOLDERS_URL = API_URL + "@me/folders/"
-API_BOOKMARKS_BY_FOLDER_URL = API_FOLDERS_URL + "{folder_id}/"
+
+LINK_MAP = {'Folder': 'folders',
+            'Bookmark': 'links',
+            'Tag': 'tags'}
+
+# folders are a bit special, so we cache them
+_FOLDERCACHE = {}
+
+
+class EmptyObjectException(Exception):
+    pass
 
 
 @dataclass
-class TimestampedObject:
+class RESTObject:
+    """ Base class for common CRUD operations."""
+
+    id: str = None
+
+    @classmethod
+    def _get_qualified_apiurl(cls):
+        """ get the base url for the object type """
+        return API_URL + f"@me/{LINK_MAP.get(cls.__name__)}/"
+
+    def delete(self):
+        """ delete instance """
+        if self.id is not None:
+            HttpInterface.delete(f"{self._get_qualified_apiurl()}{self.id}/delete/")
+
+    def load(self):
+        """ load instance details """
+        if self.id is not None:
+            result_json = HttpInterface.get(f"{self._get_qualified_apiurl()}{self.id}/")
+        else:
+            raise EmptyObjectException("Cannot load an object without an ID")
+
+    def save(self):
+        """ create or update the instance. """
+        result_json = {}
+        if not self.id:
+            # create
+            result_json = HttpInterface.post(
+                f"{self._get_qualified_apiurl()}add/",
+                asdict(self)
+            ).json()
+        else:
+            # update
+            result_json = HttpInterface.post(
+                f"{self._get_qualified_apiurl()}{self.id}/edit/",
+                asdict(self)
+            ).json()
+        for key, value in result_json.items():
+            setattr(self, key, value)
+
+    @classmethod
+    def get_all(cls):
+        """ retrieve all instances of this type. """
+        instances = []
+        next_fetch = cls._get_qualified_apiurl()
+        while next_fetch is not None:
+            logging.debug(f"Calling {next}")
+            objects_json = HttpInterface.get(next_fetch)
+            folder_objects = [cls(**f) for f in objects_json["results"]]
+            instances.extend(folder_objects)
+            next_fetch = objects_json["next"]
+            sleep(1)  # be nice to avoid throttling
+        return instances
+
+
+@dataclass
+class TimestampedObject(RESTObject):
     """ Superclass for objects carrying timestamps"""
 
-    created: str
-    modified: str
+    created: str = None
+    modified: str = None
 
     @property
     def created_date(self):
@@ -40,12 +106,15 @@ class TimestampedObject:
 
 @dataclass
 class Folder(TimestampedObject):
-    """ Lazy-loading Folder representation. """
-    id: str
-    name: str
-    color: str
-    icon: str
-    parent: str
+    """ Lazy-loading Folder representation.
+    Folder is a bit special, because a folder canonical url is actually returning
+    all bookmarks it contains. For this reason, we implement an alternative scheme
+    based on caching get_all().
+    """
+    name: str = None
+    color: str = None
+    icon: str = None
+    parent: str = None
     links: int = 0
     folders: list = field(default_factory=list)
     bookmarks: list = field(default_factory=list)
@@ -61,31 +130,36 @@ class Folder(TimestampedObject):
         although the web interface currently cannot create them."""
         return [Folder(**f) for f in self.folders]
 
-    @staticmethod
-    def get_all_folders():
-        """ retrieve all Folders in your account. """
-        logging.debug("Fetch all folders initiated")
-        folder_instances = []
-        next_fetch = API_FOLDERS_URL  # + f"?limit={num_items_per_page}&offset=0"
-        while next_fetch is not None:
-            logging.debug(f"Calling {next}")
-            folders_json = Fetcher.fetch_json(next_fetch)
-            folder_objects = [Folder(**f) for f in folders_json["results"]]
-            folder_instances.extend(folder_objects)
-            next_fetch = folders_json["next"]
-            sleep(1)  # be nice to avoid throttling
-        logging.debug("Fetch folders completed")
-        return folder_instances
+    @classmethod
+    def get_all(cls):
+        """ retrieve all Folders in your account.
+        It overrides standard get_all() to cache them."""
+        folder_instances = super().get_all()
+        _FOLDERCACHE = folder_instances
+        return copy(folder_instances)
+
+    def load(self):
+        """ override default call to avoid taking down unnecessary data """
+        cached_instance = _FOLDERCACHE.get(self.id)
+        if cached_instance is None:
+            raise EmptyObjectException("Cannot load an object without an ID")
+        for field in fields(self):
+            setattr(self, field.name, getattr(cached_instance, field))
+
+    def save(self):
+        """ override to keep caching updated """
+        super().save()
+        _FOLDERCACHE[self.id] = self
 
     def get_bookmarks(self):
         """ retrieve all bookmarks in a folder."""
         if not self._fetched:
             self.bookmarks = []
             logging.debug(f"Fetching bookmarks for {self.name}")
-            next_page = API_BOOKMARKS_BY_FOLDER_URL.format(folder_id=self.id)
+            next_page = f"{self._get_qualified_apiurl()}{self.id}/"
             while next_page is not None:
                 logging.debug(f"calling {next_page}")
-                bm_json = Fetcher.fetch_json(next_page)
+                bm_json = HttpInterface.get(next_page)
                 bm_objects = [Bookmark(**bm) for bm in bm_json["results"]]
                 self.bookmarks.extend(bm_objects)
                 next_page = bm_json["next"]
@@ -103,25 +177,32 @@ class Folder(TimestampedObject):
 @dataclass
 class Bookmark(TimestampedObject):
     """ Bookmark representation """
-    id: str
-    title: str
-    description: str
-    url: str
-    domain: str
+    url: str = None
+    title: str = None
+    description: str = None
+    domain: str = None
     tags: list = field(default_factory=list)
     meta: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        tt = [BookmarkTag(**t) for t in self.tags]
+        tt = [Tag(**t) for t in self.tags]
         self.tags = tt
 
 
 @dataclass
-class BookmarkTag(TimestampedObject):
-    """ Tag representation """
-    id: str
-    name: str
-    color: str
+class Tag(TimestampedObject):
+    """ Tag representation.
+    Note: you cannot instantiate a tag by name and then delete it.
+    This is a limitation of the Larder API.
+    To delete a tag you didn't create, get all tags first and search in there."""
+
+    name: str = None
+    color: str = None
+
+    def save(self):
+        if self.name is None:
+            raise ValueError("You cannot save a tag without a name")
+        super().save()
 
 
 def _json_to_pydate(date_string):
@@ -135,8 +216,8 @@ class AuthMode(Enum):
     OAUTH = 2
 
 
-class Fetcher:
-    """ Utility to retrieve api calls"""
+class HttpInterface:
+    """ Utility to make api calls"""
     token = None
     auth_mode = AuthMode.TOKEN
 
@@ -145,20 +226,44 @@ class Fetcher:
         """Provide the token that API requires to work. This must always be called before other API activities"""
         if auth_mode == AuthMode.OAUTH:
             raise NotImplementedError("OAuth is not supported yet.")
-        Fetcher.token = token_string
-        Fetcher.auth_mode = auth_mode
+        HttpInterface.token = token_string
+        HttpInterface.auth_mode = auth_mode
 
     @staticmethod
-    def fetch_json(url):
-        """ Fetch a given URL and return JSON object"""
-        token_name = "Bearer" if Fetcher.auth_mode == AuthMode.OAUTH else "Token"
+    def build_headers():
+        token_name = "Bearer" if HttpInterface.auth_mode == AuthMode.OAUTH else "Token"
+        if not HttpInterface.token:
+            raise Exception("Call LarderAPI.init(token) before performing other operations")
+        return {"Authorization": f"{token_name} {HttpInterface.token}"}
 
-        if not Fetcher.token:
-            raise Exception("Call Fetcher.init(token) before performing other operations")
+    @staticmethod
+    def get(url):
+        """ Fetch a given URL and return JSON object"""
+        logging.debug(f"GET on {url}")
+        headers = HttpInterface.build_headers()
         return requests.get(url,
-                            headers={"Authorization": f"{token_name} {Fetcher.token}"}
+                            headers=headers
                             ).json()
+
+    @staticmethod
+    def delete(url):
+        logging.debug(f"DELETE on {url}")
+        headers = HttpInterface.build_headers()
+        result = requests.delete(url, headers=headers)
+        logging.debug(result.status_code)
+        if result.status_code != 204:
+            raise IOError(f"Deletion operation failed, {url} \n returned code {result.status_code} : {result.text}")
+
+    @staticmethod
+    def post(url, params):
+        logging.debug(f"POST on {url}")
+        headers = HttpInterface.build_headers()
+        result = requests.post(url, params, headers=headers)
+        logging.debug(result.status_code)
+        if result.status_code != 201:
+            raise IOError(f"POST operation failed, {url} \n returned code {result.status_code} : {result.text}")
+        return result
 
 
 # aliasing
-init = Fetcher.init
+init = HttpInterface.init
